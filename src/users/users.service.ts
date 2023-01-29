@@ -1,14 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { DataSource } from 'typeorm';
+import { DataSource, FindManyOptions, LessThan, Not } from 'typeorm';
 import { Request, Response } from 'express';
-import { UserLoginDto, UserResponse, UserSignUpDto } from './dto';
+import { GetAllUserResponse, UserLoginDto, UserResponse, UserSignUpDto } from './dto';
 import { User } from './entities/user.entity';
-import { responseCode } from 'src/util/constants';
-import { DefaultResponse } from 'src/util/types';
+import { MESSAGE_LIMIT, responseCode } from '../util/constants';
+import { DefaultResponse } from '../util/types';
 import { JwtPayload, Secret, verify } from 'jsonwebtoken';
 import * as bcrypt from 'bcrypt';
+import { MessagePaginateDto, MessageResponse } from './dto/messages.dto';
+import { CommunityMessage } from '../chat/entities/community-message.entity';
+import { use } from 'passport';
 
 @Injectable()
 export class UsersService {
@@ -45,6 +48,7 @@ export class UsersService {
           name,
           avatar,
           email,
+          isOnline:true
         });
 
         const newUser = await userRepository.save(user);
@@ -76,7 +80,7 @@ export class UsersService {
     res: Response,
   ): Promise<UserResponse> {
     try {
-      const userRepository = await this.dataSource.getRepository(User);
+      const userRepository =  this.dataSource.getRepository(User);
       const userExisting = await userRepository.findOne({
         where: {
           email,
@@ -101,7 +105,9 @@ export class UsersService {
           };
         await this.setCookie(userExisting.userId, res);
         const token = await this.signToken(userExisting.userId, 'access');
- 
+          if(!userExisting.isOnline)
+          userExisting.isOnline=true
+          await userRepository.save(userExisting)
         
         return {
           code: responseCode.SUCCESS,
@@ -125,10 +131,14 @@ export class UsersService {
   // *************************************************************************************************************
   // logout
   // *************************************************************************************************************
-  logout(response: Response): DefaultResponse {
+  async logout(user:User,response: Response): Promise<DefaultResponse> {
     try {
+      const userRepository = this.dataSource.getRepository(User)
+        if(user.isOnline){
+          user.isOnline=false
+         await userRepository.save(user);
+        }
       
-      console.log(`logout:${this.config.get('COOKIE_PATH')}`);
    
         response.clearCookie(this.config.get('COOKIE_NAME'), {
           httpOnly: true,
@@ -190,6 +200,10 @@ export class UsersService {
           success: false,
           message: 'User not found',
         };
+        if(!userExisting.isOnline){
+          userExisting.isOnline=true
+          await this.dataSource.getRepository(User).save(userExisting)
+        }
       await this.setCookie(userExisting.userId, response);
       return {
         code: 200,
@@ -209,13 +223,151 @@ export class UsersService {
       };
     }
   }
+  //========================================================================================
+  //   findAllCommunityMessage
+  //========================================================================================
+  async findAllCommunityMessage(dto: MessagePaginateDto): Promise<MessageResponse> {
+    try {
+    
+      let findOptions : FindManyOptions<CommunityMessage> = {
+        where: {},
+        order:{
+          timestamp:'DESC'
+        },
+        take:MESSAGE_LIMIT,
+        relations:{
+          user:true,
+          media:true
+        },
+      };
+      if (dto.timestamp)
+        findOptions.where = {
+          timestamp: LessThan(dto.timestamp),
+        };
 
+      const messageList = await this.dataSource
+        .getRepository(CommunityMessage)
+        .find(findOptions);
+   
+
+      const firstMessage = await this.dataSource.getRepository(CommunityMessage).find({
+        take:1,
+        order:{
+          timestamp:'ASC'
+        }
+      })
+
+      let hasMore : boolean
+      
+      
+      if(dto.timestamp){
+        hasMore= new Date(dto.timestamp).valueOf()!==new Date(firstMessage[0].timestamp).valueOf()
+      }else{
+        hasMore=messageList.length>=MESSAGE_LIMIT
+      }
+
+      
+        
+      return {
+        code: 200,
+        success: true,
+        message: 'get all user message successfully!',
+        messageList,
+        hasMore:true
+      };
+    } catch (error) {
+      console.log("get message list server internal error");
+      
+      console.log(error);
+      
+      
+
+      return {
+        code: 500,
+        success: false,
+        message: JSON.stringify(error),
+      };
+    }
+  }
+  //========================================================================================
+  //   getOneUser
+  //========================================================================================
+  async getOneUser(userId:string) : Promise<UserResponse>{
+      try {
+        const userRepository = this.dataSource.getRepository(User);
+        const userExisting = await userRepository.findOne({
+          where:{
+            userId
+          },
+          select:{
+            userId:true,
+            name:true,
+            avatar:true,
+            isOnline:true
+          }
+        })
+        if(!userExisting) return{
+          success:false,
+          code:responseCode.NOT_FOUND,
+          message:'User not found'
+        }
+        return{
+          success:true,
+          code:responseCode.SUCCESS,
+          user:userExisting
+        }
+      } catch (error) {
+        this.logger.error(error)
+        return{
+          success:false,
+          code:responseCode.INTERNAL_ERROR
+        }
+      }
+  }
+  //========================================================================================
+  //   getAllUser
+  //========================================================================================
+  async getAllUser(userId? : string) : Promise<GetAllUserResponse>{
+    try {
+      const userRepository = this.dataSource.getRepository(User);
+      let query : FindManyOptions<User> = {
+        select:{
+          userId:true,
+          avatar:true,
+          isOnline:true,
+          name:true
+        },
+        order:{
+          isOnline:'DESC'
+        }
+      }
+      if(userId){
+        query.where={
+          userId:Not(userId)
+        }
+      }
+      const userList = await userRepository.find(query);
+      return {
+        success:true,
+        code:responseCode.SUCCESS,
+        userList
+      }
+    } catch (error) {
+      this.logger.error(error);
+
+      return{
+        success:false,
+        code:responseCode.INTERNAL_ERROR
+      }
+      
+      
+    }
+  }
   //========================================================================================
   //   Util
   //========================================================================================
   async setCookie(userId: string, res: Response) {
-    console.log(`checkAuth:${this.config.get('COOKIE_PATH')}`);
-    
+ 
     const refresh_token = await this.signToken(userId, 'refresh');
     res.cookie(this.config.get('COOKIE_NAME'), refresh_token, {
       httpOnly: true,

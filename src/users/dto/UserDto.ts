@@ -29,3 +29,10 @@ export interface UserResponse extends DefaultResponse{
     accessToken?:string
 }
 
+
+export interface GetAllUserResponse extends DefaultResponse{
+    userList?:User[]
+}
+
+
+
